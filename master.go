@@ -3,12 +3,12 @@
 package election
 
 import (
+	"errors"
 	"sync"
 	"time"
-	"errors"
 
 	etcd "github.com/coreos/etcd/client"
-	log "github.com/golang/glog"
+	log "github.com/Sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -66,6 +66,28 @@ func New(config Config) (*Election, error) {
 		sleep:   config.Sleep,
 		handle:  config.Handler,
 	}, nil
+}
+
+// Set the key passed
+func (self *Election) Test(key string) error {
+
+	client, err := etcd.New(etcd.Config{Endpoints: self.servers})
+
+	if err != nil {
+		return err
+	}
+
+	keysApi := etcd.NewKeysAPI(client)
+
+	_, err = keysApi.Set(context.TODO(), key, "test", &etcd.SetOptions{
+		TTL: time.Second,
+	})
+
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (self *Election) Start() {
@@ -141,11 +163,11 @@ func (self *Election) acquireOrRenewLease(etcdClient etcd.Client) (bool, error) 
 
 		if etcd.IsKeyNotFound(err) {
 			// there is no current master, try to become master, create will fail if the key already exists
-			opts := etcd.SetOptions{
-				TTL:       time.Duration(self.ttl) * time.Second,
+			_, err := keysAPI.Set(context.TODO(), self.key, self.whoami, &etcd.SetOptions{
+				TTL:       self.ttl,
 				PrevExist: "",
-			}
-			_, err := keysAPI.Set(context.TODO(), self.key, self.whoami, &opts)
+			})
+
 			if err != nil {
 				return false, err
 			}
@@ -159,9 +181,12 @@ func (self *Election) acquireOrRenewLease(etcdClient etcd.Client) (bool, error) 
 	if resp.Node.Value == self.whoami {
 		log.Infof("key already exists, we are the master (%s)", resp.Node.Value)
 		// we extend our lease @ 1/2 of the existing TTL, this ensures the master doesn't flap around
-		if resp.Node.Expiration.Sub(time.Now()) < time.Duration(self.ttl/2)*time.Second {
+
+		expiration := resp.Node.Expiration
+
+		if expiration == nil || expiration.Sub(time.Now()) < self.ttl/2 {
 			opts := etcd.SetOptions{
-				TTL:       time.Duration(self.ttl) * time.Second,
+				TTL:       self.ttl,
 				PrevValue: self.whoami,
 				PrevIndex: resp.Node.ModifiedIndex,
 			}
